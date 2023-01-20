@@ -1,0 +1,839 @@
+---
+title: "Momentum Time Series"
+author: "LT"
+date: "9 12 2021"
+output: html_document
+---
+<b><u>
+Momentum of S&P500 Tech Stocks
+<hr></b></u>
+
+This notebook applies time series analysis to momentum of S&P Tech Index.
+Stock momentum is calculated over three-month period, and can be read as what three-month return would generate investment of \$100 in S&P Tech Index over time? 
+S&P Tech Index could be approximated with SPDR Technology ETF price, which resembles S&P500 Tech, however, my preference was to use equal-weighted index while S&P500 is market-cap weighted. 
+
+Idea behind this project is derived from momentum investment philosophy, i.e. investing in assets that have been increasing in value recently, and closing position in assets that have been decreasing. I am going to utilize ARIMA (Autoregressive Integrated Moving Average) model for this problem. In simplification, Autoregressive compontent of ARIMA model measures impact of previous time series values on today's value, while Moving Average part measures impact of previous shocks in series on today's value. Estimated parameters should help in answering the question if momentum indeed is present in the data. If AR parameters were positive and statistically significant, it would imply that past values explain today's time series value.
+
+In conclusion of this analysis I would like to specify if ARIMA appropriately explains this particular momentum dataset, what are p,d,q values of ARIMA model, and what's the predictive ability of the most appropriate model defined. Potentially, I would like to improve predictive ability by employing GARCH model to residuals, given that financial time series frequently exhibit conditional hetoreskadisticity, which in simpler terms can be described as volatility clustering - periods of low volatility followed by clusters of higher volatile periods.
+
+This analysis should help in forming investment strategy on Tech Index that would outperform simple buy-and-hold strategy.
+
+<b><u>
+Libraries & Dataset
+<hr></b></u>
+
+Libraries used for this analysis are forecast, tibble, fpp2, rugarch, tseries & ggplot2, plotly for visualizations. 
+```{r eval=, warning=FALSE}
+library(forecast)
+library(tibble)
+library(fpp2)
+library(rugarch)
+library(urca)
+library(ggplot2)
+library(plotly)
+```
+
+Dataset was compiled in Python (my preferred language for data extraction & manipulation), and the output was loaded to R. 
+First, prices for all S&P500 Tech Stocks (latest available composition) were extracted from Yahoo Finance and daily growth rates were computed for each stock. Then, for each day, growth rates were averaged so that the output would be simple (or equal-weighted) average daily return for the whole index. For each day, missing observations were excluded  - these were growth rates for stocks that were IPOed later in the analysis period. Then, assuming that \$100 was the beginnig value of the index, each next day's index value was calculated by multiplying said \$100 by average daily growth rate for the sector. This formed the time series of Tech Stock Index and subsequently it was utilized to calculate three-month momentum series.  Momentum series starts at 2014-01-02, and can be interpreted as what return would be generated in 3 months if \$100 was invested at day 2014-01-02, and this question rolls forward throughout the whole time frame. First couple of observations are provided below, accompanied with a graphical representation of the dataset.
+
+
+```{r echo = FALSE}
+path = "C:/Users/lukas/projects_py/Stock Market/files/momentum.csv"
+data = read.csv(path)
+data = data[,c("Date","Momentum")]
+data[,'Date'] = as.Date(data$Date)
+head(data,10)
+```
+
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.width = 9.5}
+library(ggplot2)
+library(plotly)
+p <- ggplot(data, aes(x=Date, y = Momentum, group = 1)) + 
+  geom_line(color = '#FAF2CC', size = 0.3) +
+  xlab("")+
+  ylab("Momentum")
+p <- p + scale_x_date(date_labels = "%m/%Y", date_breaks = "3 month") +
+  theme(panel.background = element_rect(fill = "#06314F"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle=45, hjust =1))
+ggplotly(p, size = 2)
+```
+
+
+<b><u>
+Analysis of Stationarity In The Data
+<hr></b></u>
+
+At the first glance, momentum data look stationary: there seem to be a constant long-term mean at around 106, and constant variance over time with a few significant spikes, like ones at November 2018 & January 2020. If one invested at these dates, then their return from investment would drop down as far as c25%. 
+
+Stationarity is a crucial concept as many statistical methods are based on this assumption, i.e. statistical properties of a time series are constant over time. For these models, if stationarity condition is not satisfied, then estimates and statistical inferrence is unreliable and might be misleading.
+
+Different methods can be employed to conclude about stationarity. First, plotting the data and looking at the ACF/PACF (Autocorrelation Function) plots. Another option is to perform parametric tests like Augmented Dickey-Fuller or KPSS tests. Code and results are presented below. 
+
+```{r, fig.width = 9.5}
+par(mfrow=c(1,2))
+acf(data$Momentum, lag = 65, main = NA)
+pacf(data$Momentum, lag = 65, main = NA)
+```
+
+ADF test hypothesis set:
+<br> H0: unit root is present in a time series
+<br> H1: root outside the unit circle, which is usually equivalent to stationary or trend stationary.
+<br> Wikipedia's definition on unit root states that linear stochastic process has a unit root if 1 is a root of the process's characteristic equation. Less formally though, if a process has unit root, then shock affecting time series should disappear with time. 
+
+
+```{r warning = FALSE, message = FALSE}
+library(tseries)
+adf_test = adf.test(data$Momentum)
+adf_test
+```
+
+KPSS test hypothesis set:
+<br> H0: data is (trend) stationary
+<br> H1: unit root is present in a time series
+```{r warning = FALSE, message = FALSE}
+library(tseries)
+kpss_test = kpss.test(data$Momentum)
+kpss_test
+```
+
+Result of ADF test is p-value below significance level of 0.05, hence null hypothesis can be rejected in favor of alternative hypothesis: root is outside the unit circle, data should be stationary.
+
+Result of KPSS test is p-value below significance level of 0.05, hence null hypothesis can be rejected in favor of alternative hypothesis: unit root is present in time series. 
+
+Above tests provide spurious results, where ADF suggest that data is stationary and KPSS says the opposite. Such a contradiction might happen with series that are stationary by difference, meaning that differencing the series D times should transform it to a realization of stationary process. In other words, it can be said that time series are <i>integrated processes </i> when they can be made stationary by differencing.  Let's do that next, visualize the differenced series and again plot the ACF and compute ADF & KPSS tests.
+
+```{r}
+# Add columnt with differenced momentum values
+
+data["MomentumDiff"] = rep(NA,1912)
+data[2:1912,"MomentumDiff"] = diff(data$Momentum)
+data = na.omit(data)
+head(data,10)
+```
+
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.width = 9.5}
+library(ggplot2)
+library(plotly)
+
+
+p <- ggplot(data, aes(x=Date, y = MomentumDiff, group = 1)) + 
+  geom_line(color = '#FAF2CC', size = 0.3) +
+  xlab("") +
+  ylab("Differenced Momentum")
+p <- p + scale_x_date(date_labels = "%m/%Y", date_breaks = "3 month") +
+  theme(panel.background = element_rect(fill = "#06314F"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle=45, hjust =1))
+ggplotly(p, size = 2)
+```
+
+
+```{r, fig.width = 9.5, echo = FALSE}
+par(mfrow=c(1,2))
+acf(data$MomentumDiff, lag = 65, main = NA)
+pacf(data$MomentumDiff, lag = 65, main = NA)
+```
+
+```{r warning = FALSE, message = FALSE, echo = FALSE}
+library(tseries)
+adf_test = adf.test(data$MomentumDiff)
+adf_test
+```
+```{r warning = FALSE, message = FALSE, echo = FALSE}
+library(tseries)
+kpss_test = kpss.test(data$MomentumDiff)
+kpss_test
+```
+
+After differencing the series one time ACF plot suggest non-stationarity has been removed successfully. There are still some significant spikes, especially for lags up to 10, however, the steady decay pattern has been successfully removed. What about ADF and KPSS test? ADF's p-value is 0.01, hence we can remove null hypothesis in favor of alternative saying that data should be (trend) stationary; KPSS's p-value is 0.1, so above significance level of 0.05, hence we cannot reject the null hypothesis of (trend) stationarity of the data. Three diagnostics utilized points toward same conclusion: momentum data is an integrated process of order 1, to transform it to stationarity differencing needs to be applied. 
+
+Differenced series will be used for further analysis. 
+
+<b><u>
+Finding Best ARIMA Fit
+<hr></b></u>
+
+Let's first check what model auto.arima function propose for the data we have. 
+
+```{r autoarima, cache = TRUE}
+library(forecast)
+data_diff = ts(data$MomentumDiff, start = 1, frequency = 62)
+fit = auto.arima(data_diff)
+summary(fit)
+checkresiduals(fit)
+```
+
+Function auto.arima has fitted ARIMA model of order p = 4, d = 0, q = 5 and seasonal components P = 1, D = 0, Q = 0 for data with frequency 62 as the most preferred fit. Hence, today's value for differenced series is impacted by AR(4) and MA(5) components, and AR(1)[62] component. It can be understood that today's value is influenced by 4 latest values, one value from 62 days before and last 5 errors (shocks). 
+
+When we inspect residuals diagnostics produced by checkresiduals function, then we can notice significant ACF spikes at regular lags of k*62. It means that perhaps seasonality component was not captured properly. It would be desirable to improve that so that errors do not incorporate any information that could be captured by the model itself. Moreover, distribution of residuals is not normal, but rather negatively skewed, but this cannot always be remedied. Let's try to adjust seasonal component of the proposed ARIMA model first so that residuals become random indeed. First idea is to change seasonal component from (1,0,0) to (0,0,1). 
+
+
+```{r arimafit, cache = TRUE}
+library(forecast)
+fit2 = Arima(data_diff, order = c(4,0,5), seasonal = list(order = c(0,0,1)))
+summary(fit2)
+checkresiduals(fit2)
+```
+
+Apparently, it worked. Significant spikes at ACF plot are no more visible, and goodness of fit measures imrpoved as well - they are lower for ARIMA(4,0,5)(0,0,1) than ARIMA(4,0,5)(1,0,0). 
+
+There is still chance that we can improve the model even further by looking at different orders of p & q, therefore let's try to perform grid search on parameters p & q up to 10. Let's assume that parameter d is 0 now, given that we previously differenced the series and removed the integration of the process (the I in ARIMA model). At this point the interest goes towards model minimizing AIC/BIC/AICC as well as LjungBox test that verifies (lack of) serial autocorrelation in residuals. 
+
+```{r arima_grid_search, cache = TRUE, warnings = FALSE, echo = TRUE,results="hide"}
+library(tibble)
+params = tibble("A", 0,1,2,"Lb") # tibble named so that each column has appropriate type (character/double)
+colnames(params) = c("Order", "AIC","BIC","AICC","LjungBox20")
+i = 0
+for(p in (0:10)){
+  for(d in (0)){
+    for(q in (0:10)){
+      print(paste("Working on", p, d, q, sep =" "))
+      
+      modelest = try(Arima(data_diff, order = c(p,d,q),
+                       seasonal = list(order = c(0,0,1))))
+      
+      if(class(modelest)[1] != "try-error"){
+        LjungBox = Box.test(as.vector(na.omit(modelest$residuals)), 
+                         type = c("Ljung-Box"), lag = 20)
+      
+        i = i + 1
+        params[i, "Order"] = paste(p, d, q, sep =",")
+        params[i, "AIC"] = modelest$aic
+        params[i, "BIC"] = modelest$bic
+        params[i, "AICC"] = modelest$aicc
+        params[i, "LjungBox20"] = sprintf("%.5f",LjungBox$p.value)
+      }else{
+        i = i + 1
+        params[i, "Order"] = "NA"
+        params[i, "AIC"] = 99999
+        params[i, "BIC"] = 99999
+        params[i, "AICC"] = 99999
+        params[i, "LjungBox20"] = "NA"
+      }
+    }
+  }
+}
+
+```
+
+```{r print_params, echo = FALSE}
+head(params[order(params$AICC),],10) # sort the output with best fit at the top
+```
+
+```{r save_params, echo = FALSE}
+path = "C:/Users/lukas/projects_py/Stock Market/files/arimagridsearch.csv"
+write.csv(params, path)
+```
+
+From the output above it can be stated that w.r.t AIC/AICC measures best model is of order ARIMA(3,0,9)(0,0,1). AIC and AICC are preffered as their objective is forecasting accuracy. 
+
+<b><u>
+Time Series Cross Validation
+<hr></b></u>
+
+Best model selection has been performed on the whole dataset, while a common practice is to split the data into training set and test set, where the model can be fit with the first set and then it's predictive ability tested with the second set. Because the test data is not used in determining the model, it should provide a reliable indication of how well the model is likely to forecast on new data. Usually split is done 70/30 or 80/20, for the training and test sets respectively. However, this one arbitrary split may lead to a selection bias, where the training set is not representative of the true distribution, hence the model itself won't be able to predict correctly. 
+
+Therefore, a bit more sophisticated version of train/test split can be applied as a potential remady, that is time series cross validation. In this procedure, there are a series of test sets, each consisting of a single observation. The corresponding training set consists only of observations that occurred prior to the observation that forms the test set. Forecast errors are commonly summarized with RMSE metric (Root Mean Squared Error).
+
+```{r rolling_tscv}
+rolling_tscv<-function(y, nobs, steps = 1, fcast = 1, p, d, q){
+  # numeric to store RMSE:
+  output = 0 
+  
+  # number of iterations to be performed based on parameters provided
+  len = length(y)
+  iterations = floor((len - fcast - nobs)/steps)+1
+  
+  print(paste("Model ", p,d,q, "Total iterations: ", iterations, seq = ""))
+  
+  # train Arima model of selected order(p,d,q) on first number of observations (nobs)
+  yfit = ts(y[0:nobs],frequency = 62)
+  model_train = Arima(yfit, order = c(p,d,q), seasonal = list(order = c(0,0,1)),
+                      include.mean = FALSE)
+  
+  # perform iterations
+  if((len - fcast) > nobs){
+    for(i in seq(iterations)){
+      step = (i-1)*steps
+      ytrain = ts(y[step:(nobs + step)], frequency = 62) # create new training set
+      ytest = y[(nobs+step+fcast)] # create new test set
+      modfit = Arima(ytrain, model = model_train) # fit model with parameters   estimated in model_train 
+      fcastv = forecast(modfit, h = fcast) # forecast h-steps forward
+      fcastv = fcastv$mean[fcast] # extract forecast h
+      errorsq = (fcastv - ytest)^2 # compute squared error
+      output = output + errorsq # sum of squared errors
+    }
+  }
+  rmse = sqrt(output/iterations) # root mean of squared erros
+  return(rmse)
+}
+```
+
+```{r, echo = FALSE}
+path = "C:/Users/lukas/projects_py/Stock Market/files/arimagridsearch.csv"
+orders = read.csv(path)
+orders = orders$Order
+```
+
+```{r rmse_calc, cache = TRUE, warnings = FALSE, echo = TRUE,results="hide"}
+m = matrix(0, nrow = 11^2, ncol = 2) # p and q from 0 to 10, hence nrwos = 11^2
+rmse_output = data.frame(m)
+colnames(rmse_output) = c("Order", "RMSE")
+rmse_output$Order = orders # orders is a vector of all orders from ARIMA grid search
+
+# For each model
+for(i in 1:dim(rmse_output)[1]){
+  order = unlist(strsplit(rmse_output$Order[i], ","))
+  p = as.numeric(order[1])
+  d = as.numeric(order[2])
+  q = as.numeric(order[3])
+  
+  rmse_output[i,2] = rolling_tscv(data_diff, nobs = 1260, steps = 6, fcast = 5, p, d, q)
+}
+
+```
+
+```{r print_rmse, echo = FALSE}
+head(rmse_output[order(rmse_output$RMSE),],10) # sort the output with lowest RMSE at the top
+```
+
+```{r save_rmse, echo = FALSE}
+path = "C:/Users/lukas/projects_py/Stock Market/files/arimatscv.csv"
+write.csv(rmse_output, path)
+```
+
+Model with the lowest RMSE on rolling basis is ARIMA(5,1,6)(0,0,1). According to AIC/AICC criterions, this model wouldn't hit the top ranks. Therefore, the decision has to be made as what model to use? My preference would be ARIMA(5,1,6)(0,0,1) given it's superiority in forecasting 5th value ahead. To confirm, model (3,1,9)(0,0,1) underperforms preferred model. 
+
+```{r cache = TRUE, warnings = FALSE, echo = TRUE}
+rolling_tscv(data_diff, nobs = 1260, steps = 6, fcast = 5, 5, 1, 6)
+rolling_tscv(data_diff, nobs = 1260, steps = 6, fcast = 5, 3, 1, 9)
+```
+
+<b><u>
+Forecasting
+<hr></b></u>
+
+For the selected model, let's forecast and plot the estimates vs. actually observed values. 
+
+
+```{r generate_fcasts}
+generate_fcasts<-function(y, nobs, steps = 1, fcast = 1, p, d, q){
+  output = as.double()
+  
+  len = length(y)
+  iterations = floor((len - fcast - nobs)/steps)+1
+  print(paste("Model ", p,d,q, "Total iterations: ", iterations, seq = ""))
+  yfit = ts(y[0:nobs],frequency = 62)
+  model_train = Arima(yfit, order = c(p,d,q), seasonal = list(order = c(0,0,1)))
+  
+  if((len - fcast) > nobs){
+    for(i in seq(iterations)){
+      step = (i-1)*steps
+      ytrain = ts(y[step:(nobs + step)], frequency = 62)
+      ytest = y[(nobs+step+fcast)]
+      modfit = Arima(ytrain, model = model_train)
+      fcastv = forecast(modfit, h = fcast)
+      fcastv = fcastv$mean[fcast]
+      output[i] = fcastv
+    }
+  }
+  return(output)
+}
+```
+
+```{r, cache = TRUE}
+momentum = ts(data$Momentum, start = 1, frequency = 62)
+fcast = generate_fcasts(momentum, nobs = 1260, steps = 1, fcast = 5, p=5, d=1, q=6)
+fcast_df = data.frame("Date"=data$Date[1265:1911])
+fcast_df["Forecast"] = fcast
+fcast_df["Actual"] = data$Momentum[1265:1911]
+head(fcast_df)
+```
+
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.width = 9.5}
+library(ggplot2)
+library(plotly)
+
+p <- ggplot(fcast_df) + 
+  geom_line(aes(x = Date, y = Actual), color = '#873a36', size = 0.5, lty = 2) +
+  geom_line(aes(x = Date, y = Forecast), color = "#FAF2CC", size = 0.3, lty = 1) + 
+  
+  xlab("") +
+  ylab("Differenced Momentum")
+
+p <- p + scale_x_date(date_labels = "%m/%Y", date_breaks = "3 month") +
+  theme(panel.background = element_rect(fill = "#06314F"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle=45, hjust =1))
+ggplotly(p, size = 2, tooltip = c("Date","Actual","Forecast"))
+```
+
+
+<b><u>
+Attempt to Augment Forecasting Capability With Volatility Modelling
+<hr></b></u>
+
+
+```{r}
+momentum = ts(data$Momentum, start = 1, frequency = 62)
+modelfit = Arima(momentum, order = c(5,1,6), seasonal = list(order = c(0,0,1)))
+mod_errors = modelfit$residuals^2
+plot(mod_errors)
+```
+
+
+```{r}
+library(rugarch)
+vol = mod_errors
+ug_spec = ugarchspec(mean.model = list(armaOrder = c(0,0)),
+                     variance.model = list(model = "sGARCH", garchOrder = c(1,1)))
+ugfit = ugarchfit(spec = ug_spec, data = vol)
+ugfit
+```
+
+```{r}
+plot(as.numeric(vol), type = "l")
+lines(sqrt(ugfit@fit$var), col = "green")
+```
+
+```{r}
+plot(ugfit, which = "all")
+```
+
+
+```{r generate_vol_fcasts}
+generate_vol_fcasts<-function(y, nobs, steps = 1, fcast = 1){
+  output = as.double()
+  
+  len = length(y)
+  iterations = floor((len - fcast - nobs)/steps)+1
+  print(paste("Total iterations: ", iterations, seq = ""))
+  yfit = ts(y[0:nobs],frequency = 62)
+  
+  # SARIMA
+  model_train = Arima(yfit, order = c(5,1,6), seasonal = list(order = c(0,0,1)))
+  
+  # GARCH
+  ugspec = ugarchspec(mean.model = list(armaOrder = c(0,0)),
+                     variance.model = list(model = "sGARCH", garchOrder = c(1,1)))
+  # Iterations
+  if((len - fcast) > nobs){
+    for(i in seq(iterations)){
+      step = (i-1)*steps
+      # Train/Test Split
+      ytrain = ts(y[step:(nobs + step)], frequency = 62)
+
+      # Fit ARIMA & forecast
+      modfit = Arima(ytrain, model = model_train)
+      fcast_arima = forecast(modfit, h = fcast)
+      fcast_arima = fcast_arima$mean[fcast]
+      
+      # Fit GARCH & forecast
+      resid = modfit$residuals^2
+      ugfit = ugarchfit(spec = ugspec, data = resid)
+      fcast_garch = ugarchforecast(fitORspec = ugfit, n.ahead = 5)
+      fcast_garch = fcast_garch@forecast$sigmaFor[5]*mean(rnorm(1000)) # standard deviation
+      
+      output[i] = fcast_arima + fcast_garch
+    }
+  }
+  return(output)
+}
+```
+
+
+
+```{r, cache = TRUE}
+momentum = ts(data$Momentum, start = 1, frequency = 62)
+fcast = generate_vol_fcasts(momentum, nobs = 1260, steps = 1, fcast = 5)
+fcast_df = data.frame("Date"=data$Date[1265:1911])
+fcast_df["Forecast"] = fcast
+fcast_df["Actual"] = data$Momentum[1265:1911]
+head(fcast_df)
+```
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.width = 9.5}
+library(ggplot2)
+library(plotly)
+
+p <- ggplot(fcast_df) + 
+  geom_line(aes(x = Date, y = Actual), color = '#873a36', size = 0.5, lty = 2) +
+  geom_line(aes(x = Date, y = Forecast), color = "#FAF2CC", size = 0.3, lty = 1) + 
+  
+  xlab("") +
+  ylab("Differenced Momentum")
+
+p <- p + scale_x_date(date_labels = "%m/%Y", date_breaks = "3 month") +
+  theme(panel.background = element_rect(fill = "#06314F"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle=45, hjust =1))
+ggplotly(p, size = 2, tooltip = c("Date","Actual","Forecast"))
+```
+
+
+```{r }
+rolling_vol_tscv<-function(y, nobs, steps = 1, fcast = 1){
+  # numeric to store RMSE:
+  output = 0 
+  
+  # number of iterations to be performed based on parameters provided
+  len = length(y)
+  iterations = floor((len - fcast - nobs)/steps)+1
+  
+  print(paste("Total iterations: ", iterations, seq = ""))
+  
+  # train Arima model of selected order(p,d,q) on first number of observations (nobs)
+  yfit = ts(y[0:nobs],frequency = 62)
+  model_train = Arima(yfit, order = c(5,1,6), seasonal = list(order = c(0,0,1)),
+                      include.mean = FALSE)
+  
+  # GARCH
+  ugspec = ugarchspec(mean.model = list(armaOrder = c(0,0)),
+                     variance.model = list(model = "sGARCH", garchOrder = c(1,1)))
+  
+  # perform iterations
+  if((len - fcast) > nobs){
+    for(i in seq(iterations)){
+      step = (i-1)*steps
+      ytrain = ts(y[step:(nobs + step)], frequency = 62) # create new training set
+      ytest = y[(nobs+step+fcast)] # create new test set
+      
+      # Fit ARIMA & forecast
+      modfit = Arima(ytrain, model = model_train)
+      fcast_arima = forecast(modfit, h = fcast)
+      fcast_arima = fcast_arima$mean[fcast]
+      
+      # Fit GARCH & forecast
+      resid = modfit$residuals^2
+      ugfit = ugarchfit(spec = ugspec, data = resid)
+      fcast_garch = ugarchforecast(fitORspec = ugfit, n.ahead = 5)
+      fcast_garch = fcast_garch@forecast$sigmaFor[5] # standard deviation
+      
+      errorsq = ((fcast_arima+fcast_garch*mean(rnorm(1000))) - ytest)^2 # compute squared error
+      output = output + errorsq # sum of squared errors
+    }
+  }
+  rmse = sqrt(output/iterations) # root mean of squared erros
+  return(rmse)
+}
+```
+
+```{r}
+rolling_vol_tscv(momentum, nobs = 1260, steps = 1, fcast = 5)
+rolling_tscv(momentum, nobs = 1260, steps = 1, fcast = 5, p=5, d=1, q=6)
+```
+
+
+Addition of GARCH model to residuals doesn't improve performance of ARIMA. Therefore, the choice is ARIMA(5,1,6)(0,0,1)
+
+
+<b><u>
+Generating Buy & Sell Signals for Momentum Strategy
+<hr></b></u>
+
+
+Plot tech index over analysis window. 
+```{r}
+path2 = "C:/Users/lukas/projects_py/Stock Market/files/techindex.csv"
+tech_index = read.csv(path2)
+tech_index = tech_index[,c("Date","Technology")]
+tech_index[,'Date'] = as.Date(tech_index$Date)
+#tech_index[,'Technology'] = log(tech_index$Technology)
+head(tech_index,10)
+```
+
+
+Add MACD 
+
+```{r}
+library(pracma)
+Tech_MA12 = movavg(tech_index$Technology,n=5, type = "e")
+Tech_MA26 = movavg(tech_index$Technology,n=26, type = "e")
+tech_index["Tech_MA12"] = Tech_MA12
+tech_index["Tech_MA26"] = Tech_MA26
+head(tech_index)
+```
+
+
+```{r}
+p <- ggplot(tech_index, aes(x=Date, y = Technology, group = 1)) + 
+  geom_line(color = '#FAF2CC', size = 0.3) +
+  xlab("")+
+  ylab("Tech Index")
+p <- p + scale_x_date(date_labels = "%m/%Y", date_breaks = "3 month") +
+  theme(panel.background = element_rect(fill = "#06314F"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle=45, hjust =1))
+
+ggplotly(p, size = 2)
+
+```
+
+
+
+```{r}
+library(pracma)
+Momentum_MA12 = movavg(data$Momentum,n=6, type = "e")
+Momentum_MA26 = movavg(data$Momentum,n=12 , type = "e")
+data[,"Date"] = tech_index$Date[2:1912]
+data["Momentum_MA12"] = Momentum_MA12
+data["Momentum_MA26"] = Momentum_MA26
+data["Con_Div"] = data$Momentum-data$Momentum_MA26
+row.names(data) = NULL #reset index
+head(data)
+```
+
+
+```{r}
+treshold = log(96.5)
+
+p <- ggplot(data, aes(x=Date, y = log(Momentum), group = 1)) + 
+  geom_line(color = '#FAF2CC', size = 0.3, lty = 1) +
+  geom_line(aes(x=Date, y = treshold), color = "grey") +
+  geom_line(aes(x=Date, y = log(Momentum_MA26)), color = "yellow") +
+  geom_line(aes(x=Date, y = log(Momentum_MA12)), color = "yellow", lty = 2) +
+  #geom_col(aes(x=Date, y = log(Momentum_MA12)-log(Momentum_MA26)), lty = 2 ) +
+  xlab("")+
+  ylab("Momentum")
+p <- p + scale_x_date(date_labels = "%m/%Y", date_breaks = "3 month") +
+  theme(panel.background = element_rect(fill = "#06314F"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle=45, hjust =1))
+
+ggplotly(p, size = 2)
+```
+
+
+```{r}
+signals = data[,c("Date","Momentum","Momentum_MA12","Momentum_MA26")]
+signals["Direction"] = sign(data$Momentum_MA12 - data$Momentum_MA26) #+1 if up, -1 if down
+signals["Convergence"] = data$Momentum_MA12 - data$Momentum_MA26 # does MA12 overtake MA26? If so, then it's buy signal
+signals["Volatility"] = vol_ma #scaled volatility >3.2
+signals["Asset"] = 1
+signals["Cash"] = 0
+
+head(signals,15)
+```
+
+
+```{r}
+transsignal = rep(0, dim(signals)[1])
+
+for(i in (2:dim(signals)[1])){
+  #Sell Signal
+  if(
+    signals$Momentum[i] <95 &
+    signals$Direction[i] < 0 &
+    signals$Asset[i-1] == 1){
+    transsignal[i] = -1
+    signals$Asset[i]= 0
+    signals$Cash[i] = 1
+  }# Buy Signal
+  else if (signals$Cash[i-1] == 1 & signals$Convergence[i] >= 0){
+    transsignal[i] = 1
+    signals$Asset[i] = 1
+    signals$Cash[i] = 0
+  }# Hold On
+  else {
+    transsignal[i] = 0
+    signals$Asset[i] = signals$Asset[i-1]
+    signals$Cash[i] = signals$Cash[i-1]
+  }
+}
+```
+
+
+```{r}
+signals["Transaction"] = transsignal
+signals
+```
+
+```{r}
+trading_strategy = tech_index[,c("Date","Technology")]
+
+growth = c(0, trading_strategy$Technology[2:1912]/trading_strategy$Technology[1:1911])
+trading_strategy["GrowthRate"] = growth
+
+trading_strategy["Transaction"] = c(0,transsignal)
+trading_strategy["Asset"] = c(1,signals$Asset)
+trading_strategy["Cash"] = c(0,signals$Cash)
+
+trading_strategy["Benchmark"] = 100
+trading_strategy["Strategy"] = 100
+
+trading_strategy
+```
+
+
+```{r}
+# Calculate Benchmark
+for(i in 2:dim(trading_strategy)[1]){
+  trading_strategy[i, "Benchmark"] = trading_strategy[i-1, "Benchmark"] *
+    trading_strategy[i, "GrowthRate"]
+}
+
+trading_strategy
+```
+
+
+```{r}
+# Calculate Strategy
+tax = 0.18
+
+for(i in 2:dim(trading_strategy)[1]){
+  if(trading_strategy$Asset[i] == 1){
+    trading_strategy$Strategy[i] = trading_strategy$Strategy[i-1] * 
+      trading_strategy[i, "GrowthRate"]
+  } else {
+    trading_strategy$Strategy[i] = trading_strategy$Strategy[i-1]
+  }
+}
+
+trading_strategy
+
+```
+
+
+```{r}
+p <- ggplot(trading_strategy, aes(x=Date, y = Benchmark, group = 1)) + 
+  geom_line(color = '#FAF2CC', size = 0.3, lty = 1) +
+  geom_line(aes(x=Date, y = Strategy), color = 'yellow') +
+  xlab("")+
+  ylab("Performance")
+p <- p + scale_x_date(date_labels = "%m/%Y", date_breaks = "3 month") +
+  theme(panel.background = element_rect(fill = "#06314F"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle=45, hjust =1))
+
+ggplotly(p, size = 2)
+```
+
+
+
+Invest regulary $X and compute return over time
+
+```{r}
+monthly_alpha = trading_strategy
+monthly_alpha["Day"] = format(monthly_alpha$Date, "%d")
+monthly_alpha["YearMonth"] = format(monthly_alpha$Date, "%Y-%m")
+
+ma_grouped = group_by(monthly_alpha, YearMonth)
+ma_grouped = filter(ma_grouped, Day == min(Day))
+ma_grouped$Date
+
+
+#monthly_alpha["Benchmark_g"]
+#monthly_alpha["Strategy_g"]
+```
+
+Group each year-month 
+
+```{r}
+monthly_alpha = trading_strategy[,c("Date","Technology","GrowthRate", "Transaction","Asset","Cash")]
+monthly_alpha["Invest"] = 0
+
+monthly_alpha["Day"] = format(monthly_alpha$Date, "%d")
+monthly_alpha["YearMonth"] = format(monthly_alpha$Date, "%Y-%m")
+
+ma_grouped = group_by(monthly_alpha, YearMonth)
+ma_grouped = filter(ma_grouped, Day == min(Day))
+
+for (i in 1:length(ma_grouped$Date)){
+  dateval = ma_grouped$Date[i]
+  monthly_alpha[monthly_alpha$Date == dateval,"Invest"] = 1
+}
+
+monthly_alpha = select(monthly_alpha, -c("Day","YearMonth"))
+monthly_alpha
+```
+
+
+```{r}
+
+# Set Monthly Investment Value
+monthly_investment = 500
+
+# Calculate Strategy with Monthly Investment of X
+monthly_alpha["Strategy"] = 0
+monthly_alpha[1,"Strategy"] = monthly_investment
+
+for(i in 2:(dim(monthly_alpha)[1])){
+  if(monthly_alpha[i, "Asset"] == 1 & monthly_alpha[i, "Invest"] == 1){
+    monthly_alpha$Strategy[i] = (monthly_alpha$Strategy[i-1] * monthly_alpha[i, "GrowthRate"])+
+      monthly_investment
+  }else if(monthly_alpha[i, "Asset"] == 1 & monthly_alpha[i, "Invest"] == 0){
+    monthly_alpha$Strategy[i] = monthly_alpha$Strategy[i-1] * monthly_alpha[i, "GrowthRate"]
+  }else{
+    monthly_alpha$Strategy[i] = monthly_alpha$Strategy[i-1]
+  }
+}
+
+# Calculate Benchmark with Monthly Investment of X
+monthly_alpha["Benchmark"] = 0
+monthly_alpha[1,"Benchmark"] = monthly_investment
+
+for(i in 2:(dim(monthly_alpha)[1])){
+  if(monthly_alpha[i, "Invest"] == 1){
+    monthly_alpha$Benchmark[i] = (monthly_alpha$Benchmark[i-1] * monthly_alpha[i, "GrowthRate"])+
+      monthly_investment
+  }else{
+    monthly_alpha$Benchmark[i] = monthly_alpha$Benchmark[i-1] * monthly_alpha[i, "GrowthRate"]
+  }
+}
+
+monthly_alpha
+```
+
+
+```{r}
+p <- ggplot(monthly_alpha, aes(x=Date, y = Benchmark, group = 1)) + 
+  geom_line(color = '#FAF2CC', size = 0.3, lty = 1) +
+  geom_line(aes(x=Date, y = Strategy), color = 'yellow') +
+  xlab("")+
+  ylab("Performance") +
+  geom_vline(aes(xintercept = as.numeric(Date)), data = filter(monthly_alpha, Transaction ==-1),
+             color = "red", lty = 3) +
+  geom_vline(aes(xintercept = as.numeric(Date)), data = filter(monthly_alpha, Transaction == 1),
+             color = "green", lty = 3)
+p <- p + scale_x_date(date_labels = "%m/%Y", date_breaks = "3 month") +
+  theme(panel.background = element_rect(fill = "#06314F"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle=45, hjust =1))
+
+ggplotly(p, size = 2)
+```
+
+```{r}
+monthly_alpha[monthly_alpha$Transaction == -1,]
+#tail(monthly_alpha, 500)
+```
+
+# Add another factor: if you sell below the momentum, and buy when first short term MA exceeds longer term, then next sell is allowable after the momentum exceeds momentum treshold
+
+
+
+```{r}
+#Momentum_MA12 = movavg(data$Momentum,n=6, type = "e")
+#Momentum_MA26 = movavg(data$Momentum,n=10 , type = "e")
+
+monthly_alpha["MomentumShort"] = c(100, Momentum_MA12)
+monthly_alpha["MomentumLong"] = c(100, Momentum_MA26)
+
+monthly_alpha
+
+```
+
+
+
