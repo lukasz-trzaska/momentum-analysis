@@ -2,7 +2,8 @@
 title: "Momentum Time Series"
 author: "LT"
 date: "9 12 2021"
-output: html_document
+output: rmarkdown::github_document
+always_allow_html: true
 ---
 <b><u>
 Momentum of S&P500 Tech Stocks
@@ -23,7 +24,7 @@ Libraries & Dataset
 <hr></b></u>
 
 Libraries used for this analysis are forecast, tibble, fpp2, rugarch, tseries & ggplot2, plotly for visualizations. 
-```{r eval=, warning=FALSE}
+```{r eval=FALSE, warning=FALSE}
 library(forecast)
 library(tibble)
 library(fpp2)
@@ -37,7 +38,7 @@ Dataset was compiled in Python (my preferred language for data extraction & mani
 First, prices for all S&P500 Tech Stocks (latest available composition) were extracted from Yahoo Finance and daily growth rates were computed for each stock. Then, for each day, growth rates were averaged so that the output would be simple (or equal-weighted) average daily return for the whole index. For each day, missing observations were excluded  - these were growth rates for stocks that were IPOed later in the analysis period. Then, assuming that \$100 was the beginnig value of the index, each next day's index value was calculated by multiplying said \$100 by average daily growth rate for the sector. This formed the time series of Tech Stock Index and subsequently it was utilized to calculate three-month momentum series.  Momentum series starts at 2014-01-02, and can be interpreted as what return would be generated in 3 months if \$100 was invested at day 2014-01-02, and this question rolls forward throughout the whole time frame. First couple of observations are provided below, accompanied with a graphical representation of the dataset.
 
 
-```{r echo = FALSE}
+```{r}
 path = "C:/Users/lukas/projects_py/Stock Market/files/momentum.csv"
 data = read.csv(path)
 data = data[,c("Date","Momentum")]
@@ -46,7 +47,8 @@ head(data,10)
 ```
 
 
-```{r echo = FALSE, warning = FALSE, message = FALSE, fig.width = 9.5}
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.width = 9.5, include = TRUE}
+knitr::opts_chunk$set(echo = TRUE)
 library(ggplot2)
 library(plotly)
 p <- ggplot(data, aes(x=Date, y = Momentum, group = 1)) + 
@@ -59,6 +61,7 @@ p <- p + scale_x_date(date_labels = "%m/%Y", date_breaks = "3 month") +
         panel.grid.minor = element_blank()) +
   theme(axis.text.x = element_text(angle=45, hjust =1))
 ggplotly(p, size = 2)
+p
 ```
 
 
@@ -230,7 +233,7 @@ path = "C:/Users/lukas/projects_py/Stock Market/files/arimagridsearch.csv"
 write.csv(params, path)
 ```
 
-From the output above it can be stated that w.r.t AIC/AICC measures best model is of order ARIMA(3,0,9)(0,0,1). AIC and AICC are preffered as their objective is forecasting accuracy. 
+From the output above it can be stated that w.r.t AIC/AICC measures best model is of order ARIMA(3,0,9)(0,0,1). AIC and AICC are preferred as their objective is forecasting accuracy. 
 
 <b><u>
 Time Series Cross Validation
@@ -382,6 +385,7 @@ Attempt to Augment Forecasting Capability With Volatility Modelling
 
 
 ```{r}
+library(forecast)
 momentum = ts(data$Momentum, start = 1, frequency = 62)
 modelfit = Arima(momentum, order = c(5,1,6), seasonal = list(order = c(0,0,1)))
 mod_errors = modelfit$residuals^2
@@ -564,6 +568,7 @@ head(tech_index)
 
 
 ```{r}
+library(plotly)
 p <- ggplot(tech_index, aes(x=Date, y = Technology, group = 1)) + 
   geom_line(color = '#FAF2CC', size = 0.3) +
   xlab("")+
@@ -574,7 +579,7 @@ p <- p + scale_x_date(date_labels = "%m/%Y", date_breaks = "3 month") +
         panel.grid.minor = element_blank()) +
   theme(axis.text.x = element_text(angle=45, hjust =1))
 
-ggplotly(p, size = 2)
+ggplotly(p, size=2)
 
 ```
 
@@ -582,6 +587,7 @@ ggplotly(p, size = 2)
 
 ```{r}
 library(pracma)
+data
 Momentum_MA12 = movavg(data$Momentum,n=6, type = "e")
 Momentum_MA26 = movavg(data$Momentum,n=12 , type = "e")
 data[,"Date"] = tech_index$Date[2:1912]
@@ -618,7 +624,7 @@ ggplotly(p, size = 2)
 signals = data[,c("Date","Momentum","Momentum_MA12","Momentum_MA26")]
 signals["Direction"] = sign(data$Momentum_MA12 - data$Momentum_MA26) #+1 if up, -1 if down
 signals["Convergence"] = data$Momentum_MA12 - data$Momentum_MA26 # does MA12 overtake MA26? If so, then it's buy signal
-signals["Volatility"] = vol_ma #scaled volatility >3.2
+#signals["Volatility"] = vol_ma #scaled volatility >3.2
 signals["Asset"] = 1
 signals["Cash"] = 0
 
